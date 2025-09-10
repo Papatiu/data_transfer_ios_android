@@ -1,70 +1,73 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
-import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
+import 'dart:io' show Platform;
 
-// Uuid takma adlarına gerek yok, her şey tek bir amaç için
-// DiscoveredDeviceSimple modeli aynı kalıyor
-class DiscoveredDeviceSimple {
+// Dış dünyaya (UI) sunduğumuz basit cihaz modeli
+class DiscoveredDevice {
   final String id;
   final String name;
   final int rssi;
-  DiscoveredDeviceSimple({required this.id, required this.name, required this.rssi});
+  DiscoveredDevice({required this.id, required this.name, required this.rssi});
 }
 
-
+// Projenin BLE motorunu yöneten ana sınıf
 class BleService {
   static final BleService _instance = BleService._internal();
   factory BleService() => _instance;
   BleService._internal();
 
+  // Android ve iOS'teki native kodla konuşacağımız ortak kanal
   static const MethodChannel _nativeChannel = MethodChannel('com.example.multipeer/methods');
+  static const EventChannel _eventChannel = EventChannel('com.example.multipeer/events');
 
-  bool _isAdvertising = false;
-  bool _isScanning = false;
+  Stream<dynamic>? _eventStream;
 
-  final StreamController<DiscoveredDeviceSimple> _foundController = StreamController.broadcast();
-  Stream<DiscoveredDeviceSimple> get foundDevices => _foundController.stream;
+  // UI (HomePage), native taraftan gelen olayları bu stream üzerinden dinleyecek
+  Stream<dynamic> get events {
+    _eventStream ??= _eventChannel.receiveBroadcastStream();
+    return _eventStream!;
+  }
   
-  // startScanning artık native kodu çağırıyor, flutter_reactive_ble kullanmıyoruz.
+  // --- ORTAK KOMUTLAR ---
+  // Bu komutlar hem Android hem de iOS native kodunda AYNI isimle karşılanacak
+  
+  Future<void> startAdvertising({required String deviceId, required String deviceName}) async {
+    try {
+      final args = {'deviceId': deviceId, 'deviceName': deviceName};
+      // iOS ve Android bu tek komutu dinleyecek şekilde ayarlandı.
+      await _nativeChannel.invokeMethod('startAdvertising', args);
+    } catch (e) {
+      print('startAdvertising native çağrısı başarısız: $e');
+    }
+  }
+
+  Future<void> stopAdvertising() async {
+    try {
+      await _nativeChannel.invokeMethod('stopAdvertising');
+    } catch (e) {
+      print('stopAdvertising native çağrısı başarısız: $e');
+    }
+  }
+
   Future<void> startScanning() async {
-    if (_isScanning) return;
     try {
       await _nativeChannel.invokeMethod('startScanning');
-      _isScanning = true;
     } catch (e) {
       print('startScanning native çağrısı başarısız: $e');
     }
   }
 
   Future<void> stopScanning() async {
-    if (!_isScanning) return;
     try {
-       await _nativeChannel.invokeMethod('stopScanning');
-       _isScanning = false;
-    } catch (e) { print('stopScanning native çağrısı başarısız: $e'); }
-  }
-
-  // startAdvertising artık platform ayrımı yapmadan tek bir metodu çağırıyor
-  Future<void> startAdvertising({required String deviceId, required String deviceName}) async {
-    if (_isAdvertising) return;
-    try {
-        final args = { 'deviceId': deviceId, 'deviceName': deviceName };
-        await _nativeChannel.invokeMethod('startAdvertising', args);
-        _isAdvertising = true;
-    } catch(e) {
-        print('startAdvertising native çağrısı başarısız: $e');
+      await _nativeChannel.invokeMethod('stopScanning');
+    } catch (e) {
+      print('stopScanning native çağrısı başarısız: $e');
     }
   }
 
-  Future<void> stopAdvertising() async {
-    if (!_isAdvertising) return;
-    try {
-        await _nativeChannel.invokeMethod('stopAdvertising');
-        _isAdvertising = false;
-    } catch (e) { print('stopAdvertising native çağrısı başarısız: $e'); }
-  }
-
+  // Kaynakları temizlemek için
   void dispose() {
-    _foundController.close();
+    // Bu servis artık StreamController yönetmediği için dispose'da yapacak bir şeyi yok.
+    // Stream'ler native tarafta yönetiliyor.
   }
 }
