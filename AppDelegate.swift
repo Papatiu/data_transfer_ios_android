@@ -1,204 +1,93 @@
 import UIKit
 import Flutter
-import CoreBluetooth
-import CoreLocation
+import CoreBluetooth // Bu ve Flutter import'u kritik
 
 @main
-@objc class AppDelegate: FlutterAppDelegate, FlutterStreamHandler, CLLocationManagerDelegate {
-  // Native multipeer manager (varsa) - senin mevcut native multipeer implementasyonunu kullan
-  var multipeer: MultipeerManager?
-  var eventSink: FlutterEventSink?
-  var locationManager: CLLocationManager?
-  var btRequester: CBCentralManager? // ad-hoc bluetooth trigger
+@objc class AppDelegate: FlutterAppDelegate {
+    
+    private let METHOD_CHANNEL = "com.example.multipeer/methods"
+    private let EVENT_CHANNEL = "com.example.multipeer/events"
 
-  // channel names (Dart tarafı ile birebir eşleşmeli)
-  let METHOD_CHANNEL = "com.example.multipeer/methods"
-  let EVENT_CHANNEL = "com.example.multipeer/events"
+    private var eventSink: FlutterEventSink?
 
-  override func application(
-    _ application: UIApplication,
-    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
-  ) -> Bool {
-    // register plugins (important for permission_handler etc.)
-    GeneratedPluginRegistrant.register(with: self)
+    // Native BLE Yöneticileri
+    private lazy var blePeripheral = BlePeripheralManager.shared
+    private lazy var bleCentral = BleCentralManager()
 
-    // init locationManager to be able to requestWhenInUseAuthorization and observe changes
-    self.locationManager = CLLocationManager()
-    self.locationManager?.delegate = self
-
-    // get flutter root view controller
-    guard let controller = window?.rootViewController as? FlutterViewController else {
-      fatalError("rootViewController is not FlutterViewController")
-    }
-
-    // Method / Event channels
-    let methodChannel = FlutterMethodChannel(name: METHOD_CHANNEL, binaryMessenger: controller.binaryMessenger)
-    let eventChannel = FlutterEventChannel(name: EVENT_CHANNEL, binaryMessenger: controller.binaryMessenger)
-    eventChannel.setStreamHandler(self)
-
-    // Observe notifications from BlePeripheralManager (if available) to forward to Flutter
-    NotificationCenter.default.addObserver(self, selector: #selector(didStartBleAdvertising(_:)), name: NSNotification.Name("BlePeripheralManagerDidStartAdvertising"), object: nil)
-    NotificationCenter.default.addObserver(self, selector: #selector(didStopBleAdvertising(_:)), name: NSNotification.Name("BlePeripheralManagerDidStopAdvertising"), object: nil)
-    NotificationCenter.default.addObserver(self, selector: #selector(didReceiveBleWrite(_:)), name: NSNotification.Name("BlePeripheralManagerDidReceiveWrite"), object: nil)
-    NotificationCenter.default.addObserver(self, selector: #selector(didUpdateBleState(_:)), name: NSNotification.Name("BlePeripheralManagerDidUpdateState"), object: nil)
-
-    // Method handler
-    methodChannel.setMethodCallHandler { [weak self] (call, result) in
-      guard let self = self else { return }
-      let args = call.arguments as? [String:Any]
-
-      switch call.method {
-      // --------------------
-      // Cross-platform (Android) advertise / browse (your MainActivity.kt implements these)
-      // --------------------
-      case "startAdvertising":
-        let display = args?["displayName"] as? String ?? UIDevice.current.name
-        let service = args?["serviceType"] as? String ?? "mpconn"
-        // create native multipeer manager (if you have)
-        self.multipeer = MultipeerManager(displayName: display, serviceType: service)
-        self.multipeer?.setEventSink({ [weak self] evt in
-          self?.eventSink?(evt)
-        })
-        self.multipeer?.startAdvertising()
-        result(nil)
-
-      case "startBrowsing":
-        let display = args?["displayName"] as? String ?? UIDevice.current.name
-        let service = args?["serviceType"] as? String ?? "mpconn"
-        self.multipeer = MultipeerManager(displayName: display, serviceType: service)
-        self.multipeer?.setEventSink({ [weak self] evt in
-          self?.eventSink?(evt)
-        })
-        self.multipeer?.startBrowsing()
-        result(nil)
-
-      // stop all
-      case "stop":
-        self.multipeer?.stop()
-        self.multipeer = nil
-        result(nil)
-
-      // send data via native multipeer
-      case "sendData":
-        if let typed = args?["data"] as? FlutterStandardTypedData {
-          self.multipeer?.sendData(typed.data)
-          result(nil)
-        } else {
-          result(FlutterError(code: "INVALID", message: "No data", details: nil))
+    override func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+    ) -> Bool {
+        // 1. Önce Flutter'ın ana motorunu ve plugin'lerini kaydet. Bu en önemli adım.
+        GeneratedPluginRegistrant.register(with: self)
+        
+        // 2. Flutter'ın ana ViewController'ını güvenli bir şekilde al.
+        guard let controller = window?.rootViewController as? FlutterViewController else {
+            fatalError("Root view controller, beklenen FlutterViewController değil.")
         }
 
-      case "invitePeer":
-        if let peerId = args?["peerId"] as? String {
-          self.multipeer?.invitePeer(byDisplayName: peerId)
-          result(nil)
-        } else {
-          result(FlutterError(code: "INVALID", message: "peerId required", details: nil))
+        // 3. Bizim özel yöneticilerimize, Flutter'a olay gönderebilmeleri için bir yol verelim.
+        let eventSender: ([String: Any]) -> Void = { [weak self] map in
+            DispatchQueue.main.async {
+                self?.eventSink?(map)
+            }
         }
-
-      // --------------------
-      // iOS-specific BLE advertise (our BlePeripheralManager)
-      // --------------------
-      case "startAdvertising_iOS":
-        let deviceId = args?["deviceId"] as? String ?? UUID().uuidString
-        let deviceName = args?["deviceName"] as? String ?? UIDevice.current.name
-        let serviceUuid = args?["serviceUuid"] as? String
-        // BlePeripheralManager must exist in your project (BlePeripheralManager.shared)
-        BlePeripheralManager.shared.startAdvertising(deviceId: deviceId, deviceName: deviceName, serviceUuid: serviceUuid)
-        result(nil)
-
-      case "stopAdvertising_iOS":
-        BlePeripheralManager.shared.stopAdvertising()
-        result(nil)
-
-      // --------------------
-      // Helpers: permissions / native triggers
-      // --------------------
-      case "getNativePermissions":
-        var btAuth = "unavailable"
-        if #available(iOS 13.1, *) {
-          btAuth = String(describing: CBManager.authorization)
+        bleCentral.setEventSink(eventSender)
+        blePeripheral.setEventSink(eventSender)
+        
+        // 4. Flutter'dan gelen komutları dinlemek için MethodChannel'ı kur.
+        let methodChannel = FlutterMethodChannel(name: METHOD_CHANNEL, binaryMessenger: controller.binaryMessenger)
+        
+        methodChannel.setMethodCallHandler { [weak self] (call, result) in
+             guard let self = self else { return }
+             let args = call.arguments as? [String: Any]
+            
+             switch call.method {
+                case "startAdvertising":
+                    let deviceId = args?["deviceId"] as? String ?? "iOS_ID_Default"
+                    let deviceName = args?["deviceName"] as? String ?? "iPhone"
+                    self.blePeripheral.startAdvertising(deviceId: deviceId, deviceName: deviceName, serviceUuid: nil)
+                    result(nil)
+                case "stopAdvertising":
+                    self.blePeripheral.stopAdvertising()
+                    result(nil)
+                case "startScanning":
+                    self.bleCentral.startScanning()
+                    result(nil)
+                case "stopScanning":
+                    self.bleCentral.stopScanning()
+                    result(nil)
+                // Uyumlu olması için eski iOS'a özel komutları da tutalım
+                case "startAdvertising_iOS":
+                     let deviceId = args?["deviceId"] as? String ?? "iOS_ID_Default"
+                    let deviceName = args?["deviceName"] as? String ?? "iPhone"
+                    self.blePeripheral.startAdvertising(deviceId: deviceId, deviceName: deviceName, serviceUuid: nil)
+                    result(nil)
+                case "stopAdvertising_iOS":
+                    self.blePeripheral.stopAdvertising()
+                    result(nil)
+                default:
+                    result(FlutterMethodNotImplemented)
+             }
         }
-        var locAuth = "unknown"
-        if #available(iOS 14.0, *) {
-          locAuth = String(describing: self.locationManager?.authorizationStatus)
-        } else {
-          locAuth = String(describing: CLLocationManager.authorizationStatus())
-        }
-        let info = Bundle.main.object(forInfoDictionaryKey: "NSBonjourServices") as? [String] ?? []
-        let hasBonjour = info.joined(separator: ",")
-        result(["bluetooth": btAuth, "location": locAuth, "bonjour": hasBonjour])
-
-      case "requestBluetooth":
-        // instantiate a central briefly to prompt the system permission evaluation
-        self.btRequester = CBCentralManager(delegate: nil, queue: nil, options: [CBCentralManagerOptionShowPowerAlertKey: false])
-        result(nil)
-
-      case "requestLocationPermission":
-        DispatchQueue.main.async {
-          self.locationManager?.requestWhenInUseAuthorization()
-        }
-        result(nil)
-
-      default:
-        result(FlutterMethodNotImplemented)
-      }
+        
+        // 5. Flutter'a olayları göndermek için EventChannel'ı kur.
+        let eventChannel = FlutterEventChannel(name: EVENT_CHANNEL, binaryMessenger: controller.binaryMessenger)
+        eventChannel.setStreamHandler(self) // Kendimizi stream handler olarak atıyoruz.
+        
+        return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
+}
 
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
-  }
-
-  // MARK: - Notification handlers from BlePeripheralManager
-  @objc func didStartBleAdvertising(_ n: Notification) {
-    sendEventToFlutter(["event":"bleAdvertisingStarted"])
-  }
-  @objc func didStopBleAdvertising(_ n: Notification) {
-    if let obj = n.object as? [String:Any], let err = obj["error"] as? String {
-      sendEventToFlutter(["event":"error","message":"BLE adv stop error: \(err)"])
-    } else {
-      sendEventToFlutter(["event":"bleAdvertisingStopped"])
+// EventChannel'ı yönetmek için bu extension'ı kullanmak daha temiz bir yöntemdir.
+extension AppDelegate: FlutterStreamHandler {
+    func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        self.eventSink = events
+        return nil
     }
-  }
-  @objc func didReceiveBleWrite(_ n: Notification) {
-    if let dict = n.object as? [String:Any], let data = dict["data"] as? Data {
-      let arr = [UInt8](data).map { Int($0) }
-      sendEventToFlutter(["event":"dataReceived","peerId":"ios-ble-central","data":arr])
+    
+    func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        self.eventSink = nil
+        return nil
     }
-  }
-  @objc func didUpdateBleState(_ n: Notification) {
-    if let raw = n.object as? Int {
-      sendEventToFlutter(["event":"bleState","state": raw])
-    }
-  }
-
-  // Helper to safely send map to Flutter event sink
-  func sendEventToFlutter(_ map: [String:Any]) {
-    DispatchQueue.main.async {
-      self.eventSink?(map)
-    }
-  }
-
-  // FlutterStreamHandler
-  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-    self.eventSink = events
-    return nil
-  }
-
-  func onCancel(withArguments arguments: Any?) -> FlutterError? {
-    self.eventSink = nil
-    return nil
-  }
-
-  // CLLocationManagerDelegate - forward state changes
-  func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
-    var statusStr = "unknown"
-    switch status {
-    case .notDetermined: statusStr = "notDetermined"
-    case .restricted: statusStr = "restricted"
-    case .denied: statusStr = "denied"
-    case .authorizedAlways: statusStr = "authorizedAlways"
-    case .authorizedWhenInUse: statusStr = "authorizedWhenInUse"
-    @unknown default: statusStr = "unknown"
-    }
-    self.eventSink?(["event":"nativeLocationChanged","status":statusStr])
-  }
 }
