@@ -16,8 +16,8 @@ import java.util.*
 
 class MainActivity : FlutterActivity() {
     private val TAG = "P2P_Native_Android"
-    private val METHOD_CHANNEL = "com.example.multipeer/methods" // Ortak kanal adı
-    private val EVENT_CHANNEL = "com.example.multipeer/events" // Ortak kanal adı
+    private val METHOD_CHANNEL = "com.example.multipeer/methods"
+    private val EVENT_CHANNEL = "com.example.multipeer/events"
 
     private var eventSink: EventChannel.EventSink? = null
     
@@ -38,13 +38,13 @@ class MainActivity : FlutterActivity() {
                 try {
                     val args = call.arguments as? Map<String, Any?>
                     when (call.method) {
-                        // iOS için olanları görmezden gel
-                        "startAdvertising_iOS", "stopAdvertising_iOS" -> { result.success(null) }
+                        "startAdvertising_iOS", "stopAdvertising_iOS" -> { 
+                            result.success(null)
+                        }
                         
-                        // ORTAK, PLATFORM BAĞIMSIZ KOMUTLAR
                         "startAdvertising" -> {
-                            val deviceId = args?.get("deviceId") as? String ?: "UnknownID"
-                            val deviceName = args?.get("deviceName") as? String ?: "AndroidDevice"
+                            val deviceId = args?.get("deviceId") as? String ?: "AndroidID"
+                            val deviceName = args?.get("deviceName") as? String ?: "Android Cihaz"
                             startBleAdvertising(deviceId, deviceName)
                             result.success(null)
                         }
@@ -75,7 +75,6 @@ class MainActivity : FlutterActivity() {
             })
     }
     
-    // --- Diğer Fonksiyonlar ---
     private fun sendEvent(map: Map<String, Any?>) {
         Handler(Looper.getMainLooper()).post {
             try { eventSink?.success(map) }
@@ -136,7 +135,9 @@ class MainActivity : FlutterActivity() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 try {
                     val device = result.device
-                    val name = result.scanRecord?.getServiceData(BLE_SERVICE_PARCEL)?.toString(Charset.forName("UTF-8")) ?: device.name ?: "Bilinmeyen"
+                    val serviceData = result.scanRecord?.getServiceData(BLE_SERVICE_PARCEL)
+                    val name = serviceData?.toString(Charset.forName("UTF-8")) ?: device.name ?: "Bilinmeyen"
+                    
                     sendEvent(mapOf(
                         "event" to "peerFound", 
                         "peerId" to device.address,
